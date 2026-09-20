@@ -1,0 +1,207 @@
+// Symmetric Cross-Chain Evidence Protocol
+// Full symbolic model -- flat cryptographic abstraction
+// Target: Verifpal 1.4.12
+//
+// MODELING BOUNDARY
+// -----------------
+// 1. attacker[active] represents the untrusted relaying network.
+// 2. [pkA] and [pkB] encode the assumed authentic binding of identities to
+//    their registered public keys.
+// 3. [d1] and [d2] abstract successful external cross-chain evidence
+//    verification. They DO NOT model consensus, finality, light clients,
+//    Merkle proofs, or proof verification internally.
+// 4. [delivery] models Receiver B reading the commitment already accepted by
+//    SC2 from authenticated B2 state.
+// 5. Persistent smart-contract state (state1[sid], state2[sid]) is
+//    intentionally NOT modeled in Verifpal.
+// 6. completion is a Verifpal-only modeling event emitted after SC1 completes
+//    all return-path checks. It is not protocol object t3.
+// 7. Query preconditions are intentionally retained.
+//
+// ABSTRACTION OF THE FIXED PROTOCOL CONTEXT
+// -----------------------------------------
+// protocolContext is a public atomic value denoting the canonical ordered
+// encoding Encode(domain, B1, B2, SC1, SC2). 
+//
+// CANONICAL PAPER OBJECTS AND SYMBOLIC REPRESENTATION
+// ---------------------------------------------------
+// Paper:
+//   sid  = H(Encode(domain, B1, B2, SC1, SC2, A, B, NA))
+//   M    = (sid, m, A, B)
+//   sigA = Sign(skA, H(M))
+//   t1   = (M, sigA)
+//   d1   = H(t1)
+//   Ack  = (sid, d1, NB)
+//   sigB = Sign(skB, H(Ack))
+//   t2   = (Ack, sigB)
+//   d2   = H(t2)
+//
+// Verifpal abstraction:
+//   sid  = HASH(protocolContext, aid, bid, nA)
+//   H(M) = HASH(sid, m, aid, bid)
+//   t1   = CONCAT(sid, m, aid, bid, sigA)
+//   d1   = HASH(t1)
+//   H(Ack) = HASH(sid, d1, nB)
+//   t2   = CONCAT(sid, d1, nB, sigB)
+//   d2   = HASH(t2)
+//
+// The flat tuple representation avoids nested CONCAT/SPLIT structures while
+// preserving the cryptographic dependencies relevant to the analysis.
+
+attacker[active]
+
+// ---------------------------------------------------------------------------
+// Long-term participant keys and source message creation
+// ---------------------------------------------------------------------------
+
+principal Sender[
+    knows public protocolContext, aid, bid
+    knows private skA
+
+    pkA = PUBKEY(skA)
+
+    generates nA, m
+
+    // sid = H(protocolContext, A, B, NA)
+    sid = HASH(protocolContext, aid, bid, nA)
+
+    // M = (sid, m, A, B), represented at field level.
+    // sigA = Sign(skA, H(M))
+    hMessageA = HASH(sid, m, aid, bid)
+    sigA = SIGN(skA, hMessageA)
+
+    // Flat symbolic representation of t1 = (M, sigA)
+    t1 = CONCAT(sid, m, aid, bid, sigA)
+]
+
+principal Receiver[
+    knows private skB
+    pkB = PUBKEY(skB)
+]
+
+// ---------------------------------------------------------------------------
+// Phase 1 -- Commitment on B1
+// ---------------------------------------------------------------------------
+
+Sender -> SC1: [pkA], t1
+
+principal SC1[
+    sid1, m1, aid1, bid1, sigA1 = SPLIT(t1)?
+
+    _ = ASSERT(aid, aid1)?
+    _ = ASSERT(bid, bid1)?
+
+    // Reconstruct H(M) and verify sigA.
+    hMessage1 = HASH(sid1, m1, aid1, bid1)
+    _ = SIGNVERIF(pkA, hMessage1, sigA1)?
+
+    // d1 = H(t1)
+    d1 = HASH(t1)
+]
+
+// ---------------------------------------------------------------------------
+// Phase 2 -- Cross-chain relay and verification on B2
+// ---------------------------------------------------------------------------
+//
+// Guarding d1 abstracts successful VerifyEvidence_B1(t1,e1).
+
+SC1 -> SC2: [pkA], t1, [d1]
+
+principal SC2[
+    sid2, m2, aid2, bid2, sigA2 = SPLIT(t1)?
+
+    _ = ASSERT(aid, aid2)?
+    _ = ASSERT(bid, bid2)?
+
+    hMessage2 = HASH(sid2, m2, aid2, bid2)
+    _ = SIGNVERIF(pkA, hMessage2, sigA2)?
+
+    d1Expected2 = HASH(t1)
+    _ = ASSERT(d1, d1Expected2)?
+
+    // D = (sid, m, H(t1)); B reads the accepted value from B2 state.
+    delivery = CONCAT(sid2, m2, d1Expected2)
+]
+
+// B reads the already accepted SC2/B2 state rather than an arbitrary copy.
+SC2 -> Receiver: [delivery]
+
+principal Receiver[
+    sidB, mB, d1B = SPLIT(delivery)?
+
+    generates nB
+
+    // Ack = (sid, H(t1), NB), represented at field level.
+    // sigB = Sign(skB, H(Ack))
+    hAckB = HASH(sidB, d1B, nB)
+    sigB = SIGN(skB, hAckB)
+
+    // Flat symbolic representation of t2 = (Ack, sigB)
+    t2 = CONCAT(sidB, d1B, nB, sigB)
+]
+
+// ---------------------------------------------------------------------------
+// Phase 3 -- Acknowledgment on B2
+// ---------------------------------------------------------------------------
+
+Receiver -> SC2: [pkB], t2
+
+principal SC2[
+    sidAck2, d1Ack2, nB2, sigB2 = SPLIT(t2)?
+
+    hAck2 = HASH(sidAck2, d1Ack2, nB2)
+    _ = SIGNVERIF(pkB, hAck2, sigB2)?
+
+    // Bind acknowledgment to the accepted session and exact commitment.
+    _ = ASSERT(sid2, sidAck2)?
+    _ = ASSERT(d1Expected2, d1Ack2)?
+
+    // d2 = H(t2)
+    d2 = HASH(t2)
+]
+
+// ---------------------------------------------------------------------------
+// Return evidence to B1
+// ---------------------------------------------------------------------------
+//
+// Guarding d2 abstracts successful VerifyEvidence_B2(t2,e2).
+
+SC2 -> SC1: [pkB], t2, [d2]
+
+principal SC1[
+    sidBack, d1Back, nBBack, sigBBack = SPLIT(t2)?
+
+    hAckBack = HASH(sidBack, d1Back, nBBack)
+    _ = SIGNVERIF(pkB, hAckBack, sigBBack)?
+
+    d2ExpectedBack = HASH(t2)
+    _ = ASSERT(d2, d2ExpectedBack)?
+
+    // Final source-side consistency checks.
+    _ = ASSERT(sid1, sidBack)?
+    _ = ASSERT(d1, d1Back)?
+
+    // Verifpal-only completion event. This is NOT t3.
+    completion = HASH(sidBack, d1Back, d2ExpectedBack)
+]
+
+// Used only as a query precondition marking a successfully checked return path.
+SC1 -> Sender: completion
+
+queries[
+    authentication? Sender -> SC1: t1[
+        precondition[SC1 -> Sender: completion]
+    ]
+
+    authentication? Receiver -> SC2: t2[
+        precondition[SC1 -> Sender: completion]
+    ]
+
+    authentication? SC1 -> SC2: d1[
+        precondition[SC1 -> Sender: completion]
+    ]
+
+    authentication? SC2 -> SC1: d2[
+        precondition[SC1 -> Sender: completion]
+    ]
+]
