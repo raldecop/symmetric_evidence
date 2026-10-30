@@ -1,49 +1,75 @@
 // Symmetric Cross-Chain Evidence Protocol
 // Full symbolic model -- flat cryptographic abstraction
-// Target: Verifpal 1.4.12
+// Target: Verifpal 1.6.7
 //
 // MODELING BOUNDARY
 // -----------------
 // 1. attacker[active] represents the untrusted relaying network.
 // 2. [pkA] and [pkB] encode the assumed authentic binding of identities to
-//    their registered public keys.
-// 3. [d1] and [d2] abstract successful external cross-chain evidence
-//    verification. They DO NOT model consensus, finality, light clients,
-//    Merkle proofs, or proof verification internally.
-// 4. [delivery] models Receiver B reading the commitment already accepted by
+//    their registered public keys. These guarded keys are modeling assumptions,
+//    not additional fields of the concrete protocol messages.
+// 3. [v1] and [v2] are Verifpal-only guarded verification handles that abstract
+//    successful external cross-chain evidence verification:
+//       [v1] represents VerifyEvidence_B1(t1,e1) = 1
+//       [v2] represents VerifyEvidence_B2(t2,e2) = 1
+//    They are NOT concrete protocol fields, and they are NOT the protocol
+//    evidence objects e1 and e2 themselves.
+// 4. d1 = H(t1) and d2 = H(t2) remain ordinary protocol digests. They are
+//    reconstructed locally and retain their protocol-defined roles:
+//       d1 is included in Ack,
+//       d2 identifies the exact t2 referred to by the completion record t3.
+// 5. [delivery] models Receiver B reading the commitment already accepted by
 //    SC2 from authenticated B2 state.
-// 5. Persistent smart-contract state (state1[sid], state2[sid]) is
+// 6. Persistent smart-contract state (state1[sid], state2[sid]) is
 //    intentionally NOT modeled in Verifpal.
-// 6. completion is a Verifpal-only modeling event emitted after SC1 completes
+// 7. completion is a Verifpal-only modeling event emitted after SC1 completes
 //    all return-path checks. It is not protocol object t3.
-// 7. Query preconditions are intentionally retained.
+// 8. Protocol record t3 = (sid, H(t2), e2) is not represented as a Verifpal
+//    network message because the concrete evidence object e2 is outside the
+//    symbolic cryptographic model.
+// 9. Query preconditions are intentionally retained.
+// 10. Canonical tuple checks reject extra, omitted, or differently nested fields
+//     after SPLIT and before successful acceptance. This requires the concrete
+//     protocol parser to enforce exactly the specified message encoding.
 //
 // ABSTRACTION OF THE FIXED PROTOCOL CONTEXT
 // -----------------------------------------
 // protocolContext is a public atomic value denoting the canonical ordered
-// encoding Encode(domain, B1, B2, SC1, SC2). 
+// encoding Encode(domain, B1, B2, SC1, SC2).
 //
 // CANONICAL PAPER OBJECTS AND SYMBOLIC REPRESENTATION
 // ---------------------------------------------------
 // Paper:
-//   sid  = H(Encode(domain, B1, B2, SC1, SC2, A, B, NA))
-//   M    = (sid, m, A, B)
-//   sigA = Sign(skA, H(M))
-//   t1   = (M, sigA)
+//   C    = Encode(domain, B1, B2, SC1, SC2)
+//   sid  = H(C, A, B, NA)
+//   M_A  = (C, sid, m, A, B)
+//   sigA = Sign(skA, H(M_A))
+//   t1   = (sid, m, A, B, sigA)
 //   d1   = H(t1)
 //   Ack  = (sid, d1, NB)
 //   sigB = Sign(skB, H(Ack))
 //   t2   = (Ack, sigB)
 //   d2   = H(t2)
+//   t3   = (sid, d2, e2)   // persistent completion record on B1
 //
 // Verifpal abstraction:
-//   sid  = HASH(protocolContext, aid, bid, nA)
-//   H(M) = HASH(sid, m, aid, bid)
-//   t1   = CONCAT(sid, m, aid, bid, sigA)
-//   d1   = HASH(t1)
+//   sid    = HASH(protocolContext, aid, bid, nA)
+//   H(M_A) = HASH(protocolContext, sid, m, aid, bid)
+//   t1     = CONCAT(sid, m, aid, bid, sigA)
+//   d1     = HASH(t1)        // local protocol digest
+//   v1     = HASH(t1)        // guarded verification handle for e1/VerifyEvidence_B1
 //   H(Ack) = HASH(sid, d1, nB)
-//   t2   = CONCAT(sid, d1, nB, sigB)
-//   d2   = HASH(t2)
+//   t2     = CONCAT(sid, d1, nB, sigB)
+//   d2     = HASH(t2)        // local protocol digest
+//   v2     = HASH(t2)        // guarded verification handle for e2/VerifyEvidence_B2
+//
+// IMPORTANT:
+// v1 and d1 (likewise v2 and d2) are intentionally computed from the same
+// protocol object, but they have different MODELING ROLES. d1/d2 are protocol
+// digests; v1/v2 are guarded symbolic handles used only to represent the fact
+// that external cross-chain evidence verification succeeded for that exact
+// object. The concrete protocol exchanges (t1,e1) and (t2,e2), not
+// (t1,H(t1)) and (t2,H(t2)).
 //
 // The flat tuple representation avoids nested CONCAT/SPLIT structures while
 // preserving the cryptographic dependencies relevant to the analysis.
@@ -62,15 +88,15 @@ principal Sender[
 
     generates nA, m
 
-    // sid = H(protocolContext, A, B, NA)
+    // sid = H(C, A, B, NA)
     sid = HASH(protocolContext, aid, bid, nA)
 
-    // M = (sid, m, A, B), represented at field level.
-    // sigA = Sign(skA, H(M))
-    hMessageA = HASH(sid, m, aid, bid)
+    // M_A = (C, sid, m, A, B), represented at field level.
+    // sigA = Sign(skA, H(M_A))
+    hMessageA = HASH(protocolContext, sid, m, aid, bid)
     sigA = SIGN(skA, hMessageA)
 
-    // Flat symbolic representation of t1 = (M, sigA)
+    // Flat symbolic representation of t1 = (sid, m, A, B, sigA)
     t1 = CONCAT(sid, m, aid, bid, sigA)
 ]
 
@@ -88,36 +114,53 @@ Sender -> SC1: [pkA], t1
 principal SC1[
     sid1, m1, aid1, bid1, sigA1 = SPLIT(t1)?
 
+    // Require t1 to contain exactly five fields, with canonical nesting.
+    t1Canonical1 = CONCAT(sid1, m1, aid1, bid1, sigA1)
+    _ = ASSERT(t1Canonical1, t1)?
+
     _ = ASSERT(aid, aid1)?
     _ = ASSERT(bid, bid1)?
 
-    // Reconstruct H(M) and verify sigA.
-    hMessage1 = HASH(sid1, m1, aid1, bid1)
+    // Reconstruct H(M_A) using the expected protocol context and verify sigA.
+    hMessage1 = HASH(protocolContext, sid1, m1, aid1, bid1)
     _ = SIGNVERIF(pkA, hMessage1, sigA1)?
 
-    // d1 = H(t1)
+    // Protocol digest d1 = H(t1). This is a local protocol value.
     d1 = HASH(t1)
+
+    // Verifpal-only verification handle for successful
+    // VerifyEvidence_B1(t1,e1). This is NOT protocol evidence e1.
+    v1 = HASH(t1)
 ]
 
 // ---------------------------------------------------------------------------
 // Phase 2 -- Cross-chain relay and verification on B2
 // ---------------------------------------------------------------------------
 //
-// Guarding d1 abstracts successful VerifyEvidence_B1(t1,e1).
+// Concrete protocol: SC1 -> SC2 carries (t1,e1).
+// Verifpal abstraction: t1,[v1], where [v1] denotes that the external
+// VerifyEvidence_B1(t1,e1) check succeeded for this exact t1.
 
-SC1 -> SC2: [pkA], t1, [d1]
+SC1 -> SC2: [pkA], t1, [v1]
 
 principal SC2[
     sid2, m2, aid2, bid2, sigA2 = SPLIT(t1)?
 
+    // Reject malformed or extended commitment tuples.
+    t1Canonical2 = CONCAT(sid2, m2, aid2, bid2, sigA2)
+    _ = ASSERT(t1Canonical2, t1)?
+
     _ = ASSERT(aid, aid2)?
     _ = ASSERT(bid, bid2)?
 
-    hMessage2 = HASH(sid2, m2, aid2, bid2)
+    hMessage2 = HASH(protocolContext, sid2, m2, aid2, bid2)
     _ = SIGNVERIF(pkA, hMessage2, sigA2)?
 
+    // Reconstruct the protocol digest locally.
     d1Expected2 = HASH(t1)
-    _ = ASSERT(d1, d1Expected2)?
+
+    // Bind the abstract successful evidence verification to the exact t1.
+    _ = ASSERT(v1, d1Expected2)?
 
     // D = (sid, m, H(t1)); B reads the accepted value from B2 state.
     delivery = CONCAT(sid2, m2, d1Expected2)
@@ -149,6 +192,10 @@ Receiver -> SC2: [pkB], t2
 principal SC2[
     sidAck2, d1Ack2, nB2, sigB2 = SPLIT(t2)?
 
+    // Require t2 to contain exactly four fields; reject an appended nil.
+    t2Canonical2 = CONCAT(sidAck2, d1Ack2, nB2, sigB2)
+    _ = ASSERT(t2Canonical2, t2)?
+
     hAck2 = HASH(sidAck2, d1Ack2, nB2)
     _ = SIGNVERIF(pkB, hAck2, sigB2)?
 
@@ -156,36 +203,52 @@ principal SC2[
     _ = ASSERT(sid2, sidAck2)?
     _ = ASSERT(d1Expected2, d1Ack2)?
 
-    // d2 = H(t2)
+    // Protocol digest d2 = H(t2). This is a local protocol value.
     d2 = HASH(t2)
+
+    // Verifpal-only verification handle for successful
+    // VerifyEvidence_B2(t2,e2). This is NOT protocol evidence e2.
+    v2 = HASH(t2)
 ]
 
 // ---------------------------------------------------------------------------
 // Return evidence to B1
 // ---------------------------------------------------------------------------
 //
-// Guarding d2 abstracts successful VerifyEvidence_B2(t2,e2).
+// Concrete protocol: SC2 -> SC1 carries (t2,e2).
+// Verifpal abstraction: t2,[v2], where [v2] denotes that the external
+// VerifyEvidence_B2(t2,e2) check succeeded for this exact t2.
 
-SC2 -> SC1: [pkB], t2, [d2]
+SC2 -> SC1: [pkB], t2, [v2]
 
 principal SC1[
     sidBack, d1Back, nBBack, sigBBack = SPLIT(t2)?
 
+    // Independently validate exact tuple structure on the return path.
+    t2CanonicalBack = CONCAT(sidBack, d1Back, nBBack, sigBBack)
+    _ = ASSERT(t2CanonicalBack, t2)?
+
     hAckBack = HASH(sidBack, d1Back, nBBack)
     _ = SIGNVERIF(pkB, hAckBack, sigBBack)?
 
+    // Reconstruct protocol digest d2 locally.
     d2ExpectedBack = HASH(t2)
-    _ = ASSERT(d2, d2ExpectedBack)?
+
+    // Bind the abstract successful evidence verification to the exact t2.
+    _ = ASSERT(v2, d2ExpectedBack)?
 
     // Final source-side consistency checks.
     _ = ASSERT(sid1, sidBack)?
     _ = ASSERT(d1, d1Back)?
 
-    // Verifpal-only completion event. This is NOT t3.
+    // Verifpal-only completion event. This is NOT protocol record t3.
+    // In the concrete protocol, successful completion causes SC1 to record
+    // t3 = (sid, H(t2), e2) on B1. The concrete e2 object is outside this model.
     completion = HASH(sidBack, d1Back, d2ExpectedBack)
 ]
 
 // Used only as a query precondition marking a successfully checked return path.
+// This is a modeling event, not a concrete protocol transmission.
 SC1 -> Sender: completion
 
 queries[
@@ -202,16 +265,16 @@ queries[
         precondition[SC1 -> Sender: completion]
     ]
 
-    // Origin of guarded cross-chain evidence handles.
-    authentication? SC1 -> SC2: d1[
+    // Origin of guarded cross-chain verification handles.
+    authentication? SC1 -> SC2: v1[
         precondition[SC1 -> Sender: completion]
     ]
 
-    authentication? SC2 -> SC1: d2[
+    authentication? SC2 -> SC1: v2[
         precondition[SC1 -> Sender: completion]
     ]
 
-    // Structural freshness. These do not by themselves imply accept-once.
+    // Structural freshness. These do not by themselves imply at-most-once.
     freshness? sid[
         precondition[SC1 -> Sender: completion]
     ]
@@ -225,6 +288,7 @@ queries[
         precondition[SC1 -> Sender: completion]
     ]
 
+    // d1 and d2 are protocol digests reconstructed at different stages.
     equivalence? d1, d1Back[
         precondition[SC1 -> Sender: completion]
     ]
