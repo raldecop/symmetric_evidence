@@ -299,15 +299,15 @@ chmod +x check_models.sh
 To check one model:
 
 ```bash
-verifpal pretty 01_symmetric_evidence_full.vp > /dev/null
+verifpal pretty 01_symmetric_evidence_full.vp 
 ```
 
 ### Run the complete model
 
 ```bash
-verifpal verify 01_symmetric_evidence_full.vp --sessions 1 --color never
-verifpal verify 01_symmetric_evidence_full.vp --sessions 2 --color never
-verifpal verify 01_symmetric_evidence_full.vp --sessions 3 --color never
+verifpal verify 01_symmetric_evidence_full.vp --sessions 1 
+verifpal verify 01_symmetric_evidence_full.vp --sessions 2 
+verifpal verify 01_symmetric_evidence_full.vp --sessions 3 
 ```
 
 ### Run all experiments
@@ -384,7 +384,6 @@ Expected results:
 | Freshness of `sid` | Fail | Fail | Fail |
 | Freshness of `H(Ack)` | Pass | Pass | Pass |
 
-Only `nA` is removed.
 
 ## Verification boundary
 
